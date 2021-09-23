@@ -1,6 +1,14 @@
 """copy a FEFunction on a FE Space"""
 clone_fe_function(space,f)=FEFunction(space,copy(get_free_dof_values(f)))
 
+"""
+ Given an arbitrary number of FEFunction arguments,
+ returns a tuple with their corresponding free DoF Values
+"""
+function Gridap.get_free_dof_values(functions...)
+  map(get_free_dof_values,functions)
+end
+
 function setup_mixed_spaces(model, order)
   reffe_rt  = ReferenceFE(raviart_thomas, Float64, order)
   V = FESpace(model, reffe_rt ; conformity=:HDiv)

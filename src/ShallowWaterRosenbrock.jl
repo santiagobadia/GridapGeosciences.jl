@@ -13,16 +13,6 @@ function shallow_water_rosenbrock_time_step!(
   # energetically balanced second order rosenbrock shallow water solver
   # reference: eqns (24) and (39) of
   # https://github.com/BOM-Monash-Collaborations/articles/blob/main/energetically_balanced_time_integration/EnergeticallyBalancedTimeIntegration_SW.tex
-  #
-  # f          : coriolis force (field)
-  # g          : gravity (constant)
-  # h₁         : fluid depth at current time level
-  # u₁         : fluid velocity at current time level
-  # RTMM       : H(div) mass matrix, ∫β⋅βdΩ, ∀β∈ H(div,Ω)
-  # L2MM       : L² mass matrix, ∫γγdΩ, ∀γ∈ L²(Ω)
-  # dt         : time step
-  # τ          : potential vorticity upwinding parameter
-  # dΩ         : measure of the elements
 
   n = get_normal_vector(model)
   dt₁ = dt

@@ -1,48 +1,11 @@
-function compute_potential_vorticity!(q,H1h,H1hchol,dΩ,R,S,h,u,f,n)
-  a(r,s) = ∫(s*h*r)dΩ
-  c(s)   = ∫(perp(n,∇(s))⋅(u) + s*f)dΩ
-  Gridap.FESpaces.assemble_matrix_and_vector!(a, c, H1h, get_free_dof_values(q), R, S)
-  lu!(H1hchol, H1h)
-  ldiv!(H1hchol, get_free_dof_values(q))
-end
+function shallow_water_imex_time_step!(
+     h₂, u₂, uₚ, ϕ, F, q₁, q₂,                               # in/out args
+     H1h, H1hchol, h_wrk, u_wrk, A_wrk, Bchol,               # more in/out args
+     model, dΩ, dω, V, P, Q, R, S, f, g, h₁, u₁, u₀,         # in args
+     RTMMchol, L2MMchol, RTMM, L2MMinvD, dt, τ, leap_frog)   # more in args
 
-function compute_velocity!(u1,dΩ,dω,V,RTMMchol,u2,qAPVM,F,ϕ,n,dt1,dt2)
-  b(v) = ∫(v⋅u2 - dt1*(qAPVM)*(v⋅⟂(F,n)))dΩ + ∫(dt2*DIV(v)*ϕ)dω
-  Gridap.FESpaces.assemble_vector!(b, get_free_dof_values(u1), V)
-  ldiv!(RTMMchol, get_free_dof_values(u1))
-end
-
-function compute_mass_flux!(F,dΩ,V,RTMMchol,u)
-  b(v) = ∫(v⋅u)dΩ
-  Gridap.FESpaces.assemble_vector!(b, get_free_dof_values(F), V)
-  ldiv!(RTMMchol, get_free_dof_values(F))
-end
-
-function compute_depth!(h1,dΩ,dω,Q,L2MMchol,h2,F,dt)
-  b(q)  = ∫(q*h2)dΩ - ∫(dt*q*DIV(F))dω
-  Gridap.FESpaces.assemble_vector!(b, get_free_dof_values(h1), Q)
-  ldiv!(L2MMchol, get_free_dof_values(h1))
-end
-
-function compute_bernoulli_potential!(ϕ,dΩ,Q,L2MMchol,uu,h,g)
-  b(q)  = ∫(q*(0.5*uu + g*h))*dΩ
-  Gridap.FESpaces.assemble_vector!(b, get_free_dof_values(ϕ), Q)
-  ldiv!(L2MMchol, get_free_dof_values(ϕ))
-end
-
-function compute_diagnostic_vorticity!(w,dΩ,S,H1MMchol,u,n)
-  b(s) = ∫(perp(n,∇(s))⋅(u))dΩ
-  Gridap.FESpaces.assemble_vector!(b, get_free_dof_values(w), S)
-  ldiv!(H1MMchol, get_free_dof_values(w))
-end
-
-function shallow_water_explicit_time_step!(
-     h₂, u₂, hₚ, uₚ, ϕ, F, q₁, q₂, H1h, H1hchol,      # in/out args
-     model, dΩ, dω, V, Q, R, S, f, g, h₁, u₁, hₘ, uₘ, # in args
-     RTMMchol, L2MMchol, dt, τ, leap_frog)            # more in args
-
-  # energetically balanced explicit second order shallow water solver
-  # reference: eqns (21-24) of
+  # energetically balanced implicit-explicit second order shallow water solver
+  # reference: eqns (31-33) of
   # https://github.com/BOM-Monash-Collaborations/articles/blob/main/energetically_balanced_time_integration/EnergeticallyBalancedTimeIntegration_SW.tex
 
   n = get_normal_vector(model)
@@ -52,6 +15,8 @@ function shallow_water_explicit_time_step!(
     dt1 = 2.0*dt
   end
 
+  Fv,h₁v,h₂v = get_free_dof_values(F,h₁,h₂)
+
   # 1.1: the mass flux
   compute_mass_flux!(F,dΩ,V,RTMMchol,u₁*h₁)
   # 1.2: the bernoulli function
@@ -59,23 +24,55 @@ function shallow_water_explicit_time_step!(
   # 1.3: the potential vorticity
   compute_potential_vorticity!(q₁,H1h,H1hchol,dΩ,R,S,h₁,u₁,f,n)
   # 1.4: solve for the provisional velocity
-  compute_velocity!(uₚ,dΩ,dω,V,RTMMchol,uₘ,q₁-τ*u₁⋅∇(q₁),F,ϕ,n,dt1,dt1)
-  # 1.5: solve for the provisional depth
-  compute_depth!(hₚ,dΩ,dω,Q,L2MMchol,hₘ,F,dt1)
+  compute_velocity!(uₚ,dΩ,dω,V,RTMMchol,u₀,q₁-τ*u₁⋅∇(q₁),F,ϕ,n,dt1,dt1)
 
-  # 2.1: the mass flux
-  compute_mass_flux!(F,dΩ,V,RTMMchol,u₁*(2.0*h₁ + hₚ)/6.0+uₚ*(h₁ + 2.0*hₚ)/6.0)
-  # 2.2: the bernoulli function
-  compute_bernoulli_potential!(ϕ,dΩ,Q,L2MMchol,(u₁⋅u₁ + u₁⋅uₚ + uₚ⋅uₚ)/3.0,0.5*(h₁ + hₚ),g)
-  # 2.3: the potential vorticity
-  compute_potential_vorticity!(q₂,H1h,H1hchol,dΩ,R,S,hₚ,uₚ,f,n)
-  # 2.4: solve for the final velocity
+  # solve for the second order, semi-implicit mass flux
+  # 2.1: mass flux component using the previous depth (explicit)
+  compute_mass_flux!(F,dΩ,V,RTMMchol,h₁*(2.0*u₁ + uₚ)/6.0)
+  # 2.2: mass flux component using the current depth (implicit)
+  adv(p,v) = ∫(v⋅((u₁ + 2.0*uₚ)/6.0)*p)dΩ
+  Gridap.FESpaces.assemble_matrix!(adv, A_wrk, P, V)
+  # TODO: there must be a way to do these two operations in place using preallocated matrices!...
+  A        = A_wrk*L2MMinvD
+  B        = RTMM + dt*A
+  mul!(h_wrk, L2MMinvD, Fv)
+  h_wrk   .= h₁v .- dt .* h_wrk
+  mul!(u_wrk, A_wrk, h_wrk)
+  lu!(Bchol, B)
+  ldiv!(Bchol, u_wrk)
+  # 2.3: combine the two mass flux components
+  Fv .= Fv .+ u_wrk
+  # 2.4: compute the divergence of the total mass flux
+  mul!(h_wrk, L2MMinvD, Fv)
+  # 2.5: depth field at new time level
+  h₂v .= h₁v .- dt .* h_wrk
+
+  # 3.1: the bernoulli function
+  compute_bernoulli_potential!(ϕ,dΩ,Q,L2MMchol,(u₁⋅u₁ + u₁⋅uₚ + uₚ⋅uₚ)/3.0,0.5*(h₁ + h₂),g)
+  # 3.2: the potential vorticity
+  compute_potential_vorticity!(q₂,H1h,H1hchol,dΩ,R,S,h₂,uₚ,f,n)
+  # 3.3: solve for the final velocity
   compute_velocity!(u₂,dΩ,dω,V,RTMMchol,u₁,q₁-τ*u₁⋅∇(q₁)+q₂-τ*uₚ⋅∇(q₂),F,ϕ,n,0.5*dt,dt)
-  # 2.5: solve for the final depth
-  compute_depth!(h₂,dΩ,dω,Q,L2MMchol,h₁,F,dt)
 end
 
-function shallow_water_explicit_time_stepper(model, order, degree,
+function assemble_L2MM_invL2MM(U,V,dΩ)
+  a(a,b) = ∫(a⋅b)dΩ
+  v = get_fe_basis(V)
+  u = get_trial_fe_basis(U)
+  assemblytuple    = Gridap.FESpaces.collect_cell_matrix(U,V,a(u,v))
+  cell_matrix_MM   = collect(assemblytuple[1][1]) # This result is no longer a LazyArray
+  newassemblytuple = ([cell_matrix_MM],assemblytuple[2],assemblytuple[3])
+  a=SparseMatrixAssembler(U,V)
+  L2MM=assemble_matrix(a,newassemblytuple)
+  for i in eachindex(cell_matrix_MM)
+     cell_matrix_MM[i]=inv(cell_matrix_MM[i])
+  end
+  invL2MM=similar(L2MM)
+  Gridap.FESpaces.assemble_matrix!(invL2MM, a, newassemblytuple)
+  L2MM, invL2MM
+end
+
+function shallow_water_imex_time_stepper(model, order, degree,
                         h₀, u₀, f₀, g,
                         dt, τ, N;
                         write_diagnostics=true,
@@ -83,7 +80,7 @@ function shallow_water_explicit_time_stepper(model, order, degree,
                         dump_diagnostics_on_screen=true,
                         write_solution=false,
                         write_solution_freq=N/10,
-                        output_dir="nswe_eq_ncells_$(num_cells(model))_order_$(order)_explicit")
+                        output_dir="nswe_eq_ncells_$(num_cells(model))_order_$(order)_imex")
 
   # Forward integration of the shallow water equations
   Ω = Triangulation(model)
@@ -113,21 +110,28 @@ function shallow_water_explicit_time_stepper(model, order, degree,
   ldiv!(H1MMchol, get_free_dof_values(f))
 
   # work arrays
+  u_tmp = copy(get_free_dof_values(un))
   h_tmp = copy(get_free_dof_values(hn))
   w_tmp = copy(get_free_dof_values(f))
   # build the potential vorticity lhs operator once just to initialise
   bmm(a,b) = ∫(a*hn*b)dΩ
   H1h      = assemble_matrix(bmm, R, S)
   H1hchol  = lu(H1h)
+  # doubling up on the assembly of L2MM, garbage collect the old one...
+  L2MM, L2MMinv = assemble_L2MM_invL2MM(P, Q, dΩ)
+  a₁(u,q)       = ∫(q*DIV(u))*dω
+  D             = assemble_matrix(a₁, U, Q)
+  L2MMinvD      = L2MMinv*D
+  # assemble in order to preallocate the work matrix and factors
+  a₂(p,v)       = ∫(v⋅un*p)dΩ
+  A_wrk         = assemble_matrix(a₂, P, V)
+  B             = RTMM + dt*A_wrk*L2MMinvD
+  Bchol         = lu(B)
 
   function run_simulation(pvd=nothing)
     diagnostics_file = joinpath(output_dir,"nswe_diagnostics.csv")
 
-
-
     hm1    = clone_fe_function(Q,hn)
-    hm2    = clone_fe_function(Q,hn)
-    hp     = clone_fe_function(Q,hn)
     ϕ      = clone_fe_function(Q,hn)
 
     um1    = clone_fe_function(V,un)
@@ -140,9 +144,10 @@ function shallow_water_explicit_time_stepper(model, order, degree,
     q2     = clone_fe_function(S,f)
 
     # first step, no leap frog integration
-    shallow_water_explicit_time_step!(hn, un, hp, up, ϕ, F, q1, q2, H1h, H1hchol,
-                                      model, dΩ, dω, V, Q, R, S, f, g, hm1, um1, hm2, um2,
-                                      RTMMchol, L2MMchol, dt, τ, false)
+    shallow_water_imex_time_step!(hn, un, up, ϕ, F, q1, q2,
+				  H1h, H1hchol, h_tmp, u_tmp, A_wrk, Bchol,
+                                  model, dΩ, dω, V, P, Q, R, S, f, g, hm1, um1, um2,
+                                  RTMMchol, L2MMchol, RTMM, L2MMinvD, dt, τ, false)
 
     if (write_diagnostics)
       initialize_csv(diagnostics_file,"time", "mass", "vorticity", "kinetic", "potential", "power")
@@ -160,8 +165,7 @@ function shallow_water_explicit_time_stepper(model, order, degree,
     # subsequent steps, do leap frog integration
     # (now that we have the state at two previous time levels)
     for istep in 2:N
-      h_aux = hm2
-      hm2   = hm1
+      h_aux = hm1
       hm1   = hn
       hn    = h_aux
       u_aux = um2
@@ -169,9 +173,10 @@ function shallow_water_explicit_time_stepper(model, order, degree,
       um1   = un
       un    = u_aux
 
-      shallow_water_explicit_time_step!(hn, un, hp, up, ϕ, F, q1, q2, H1h, H1hchol,
-                                        model, dΩ, dω, V, Q, R, S, f, g, hm1, um1, hm2, um2,
-                                        RTMMchol, L2MMchol, dt, τ, true)
+      shallow_water_imex_time_step!(hn, un, up, ϕ, F, q1, q2,
+				    H1h, H1hchol, h_tmp, u_tmp, A_wrk, Bchol,
+                                    model, dΩ, dω, V, P, Q, R, S, f, g, hm1, um1, um2,
+                                    RTMMchol, L2MMchol, RTMM, L2MMinvD, dt, τ, true)
 
       if (write_diagnostics && write_diagnostics_freq>0 && mod(istep, write_diagnostics_freq) == 0)
         compute_diagnostic_vorticity!(wn, dΩ, S, H1MMchol, un, get_normal_vector(model))
@@ -193,7 +198,7 @@ function shallow_water_explicit_time_stepper(model, order, degree,
     mkdir(output_dir)
   end
   if (write_solution)
-    pvdfile=joinpath(output_dir,"nswe_eq_ncells_$(num_cells(model))_order_$(order)_explicit")
+    pvdfile=joinpath(output_dir,"nswe_eq_ncells_$(num_cells(model))_order_$(order)_imex")
     paraview_collection(run_simulation,pvdfile)
   else
     run_simulation()

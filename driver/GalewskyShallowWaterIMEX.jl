@@ -1,4 +1,4 @@
-module GalewskyShallowWaterExplicit
+module GalewskyShallowWaterIMEX
 
 using Gridap
 using GridapGeosciences
@@ -20,7 +20,7 @@ dt     = 60.0
 
 model = CubedSphereDiscreteModel(n; radius=rₑ)
 
-hf, uf = shallow_water_explicit_time_stepper(model, order, degree,
+hf, uf = shallow_water_imex_time_stepper(model, order, degree,
                                     h₀, u₀, f, g,
                                     dt, 0.5*dt, nstep;
                                     write_solution=true,
